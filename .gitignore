@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.ipynb_checkpoints/
+.vscode/
+data/raw/*.csv
+data/processed/*.csv
+models/*.joblib
+models/*.json
