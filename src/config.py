@@ -13,12 +13,16 @@ for directory in [RAW_DATA_DIR, PROCESSED_DATA_DIR, MODELS_DIR, FIGURES_DIR]:
 RANDOM_SEED = 42
 N_AFILIADOS = 10000
 
-# Parámetros Financieros de Negocio (en USD equivalentes para estandarización)
-# Valor de Vida del Afiliado (LTV) perdido si se da de baja sin ser retenido (Falso Negativo)
-COSTO_AFILIADO_PERDIDO_LTV = 1200.0
+# ==============================================================================
+# PARÁMETROS ECONÓMICOS DE NEGOCIO (EXPRESADOS EN PESOS ARGENTINOS - $ ARS)
+# ==============================================================================
+# Valor de Vida del Afiliado (LTV) promedio perdido cuando un titular se da de baja
+# Equivale aprox. a 12 meses de aportes/cuota neta de margen ($ 1.800.000 ARS)
+VALOR_VIDA_AFILIADO_ARS = 1_800_000.0
 
-# Costo operativo de ejecutar una acción de retención (gestión proactiva + beneficio/descuento)
-COSTO_ACCION_RETENCION = 85.0
+# Costo operativo promedio de ejecutar una acción de retención por afiliado alertado
+# Incluye tiempo de agente especializado + bonificación comercial temporal ($ 95.000 ARS)
+COSTO_GESTION_RETENCION_ARS = 95_000.0
 
-# Tasa de éxito estimada cuando se contacta proactivamente a un afiliado en riesgo
+# Porcentaje de éxito estimado cuando se interviene a tiempo a un afiliado en riesgo (45%)
 TASA_EXITO_RETENCION = 0.45

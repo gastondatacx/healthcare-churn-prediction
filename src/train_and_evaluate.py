@@ -4,6 +4,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 import seaborn as sns
 
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
@@ -15,47 +16,31 @@ from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassif
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, f1_score,
-    precision_score, recall_score, roc_curve, precision_recall_curve,
-    confusion_matrix
+    precision_score, recall_score, roc_curve, confusion_matrix
 )
 
 from src.config import (
     PROCESSED_DATA_DIR, MODELS_DIR, FIGURES_DIR, RANDOM_SEED,
-    COSTO_AFILIADO_PERDIDO_LTV, COSTO_ACCION_RETENCION, TASA_EXITO_RETENCION
+    VALOR_VIDA_AFILIADO_ARS, COSTO_GESTION_RETENCION_ARS, TASA_EXITO_RETENCION
 )
 
 plt.style.use("seaborn-v0_8-whitegrid")
+plt.rcParams["font.sans-serif"] = "DejaVu Sans"
+plt.rcParams["axes.edgecolor"] = "#cccccc"
 
 
-def calcular_ahorro_financiero(y_true, y_prob, umbral):
-    """Calcula el beneficio económico neto para un umbral de probabilidad dado."""
-    y_pred = (y_prob >= umbral).astype(int)
+def calcular_ahorro_en_pesos(y_true, y_prob, umbral_decimal):
+    """Calcula el ahorro económico neto en Pesos Argentinos ($ ARS)."""
+    y_pred = (y_prob >= umbral_decimal).astype(int)
     vn, fp, fn, vp = confusion_matrix(y_true, y_pred).ravel()
 
-    # Afiliados en riesgo real detectados * efectividad de retención * LTV salvado
-    ltv_bruto_recuperado = vp * TASA_EXITO_RETENCION * COSTO_AFILIADO_PERDIDO_LTV
-    # Costo operativo de gestionar tanto a Verdaderos Positivos como Falsos Positivos
-    costo_campana = (vp + fp) * COSTO_ACCION_RETENCION
+    # Afiliados salvados = Verdaderos Positivos * Tasa de Éxito * Valor de Vida en ARS
+    monto_recuperado_ars = vp * TASA_EXITO_RETENCION * VALOR_VIDA_AFILIADO_ARS
+    # Costo de contactar a todos los alertados (Verdaderos Positivos + Falsas Alarmas)
+    costo_operativo_ars = (vp + fp) * COSTO_GESTION_RETENCION_ARS
 
-    ahorro_neto = ltv_bruto_recuperado - costo_campana
-    return ahorro_neto, vp, fp, fn, vn
-
-
-def generar_reporte_clasificacion_es(y_true, y_pred):
-    """Genera una tabla de métricas de clasificación íntegramente en español."""
-    clases = [(0, "Permanece Activo (0)"), (1, "Baja / Fuga (1)")]
-    filas = []
-    for valor, etiqueta in clases:
-        y_bin_true = (y_true == valor).astype(int)
-        y_bin_pred = (y_pred == valor).astype(int)
-        filas.append({
-            "Clase / Estado": etiqueta,
-            "Precisión": round(precision_score(y_bin_true, y_bin_pred, zero_division=0), 4),
-            "Sensibilidad (Recall)": round(recall_score(y_bin_true, y_bin_pred, zero_division=0), 4),
-            "Puntaje F1": round(f1_score(y_bin_true, y_bin_pred, zero_division=0), 4),
-            "Cantidad Casos": int(y_bin_true.sum())
-        })
-    return pd.DataFrame(filas)
+    ahorro_neto_ars = monto_recuperado_ars - costo_operativo_ars
+    return ahorro_neto_ars, int(vp), int(fp), int(fn), int(vn)
 
 
 def train_and_select_champion():
@@ -66,7 +51,7 @@ def train_and_select_champion():
     ignore_cols = ["afiliado_id", target_col]
 
     feature_cols = [c for c in df.columns if c not in ignore_cols]
-    categorical_cols = ["plan_salud", "tipo_contratacion", "region", "condicion_cronica"]
+    categorical_cols = ["plan_salud", "tipo_contratacion", "region_residencia", "condicion_medica"]
     numeric_cols = [c for c in feature_cols if c not in categorical_cols]
 
     X = df[feature_cols]
@@ -84,33 +69,28 @@ def train_and_select_champion():
     )
 
     modelos = {
-        "Regresión Logística (Base)": LogisticRegression(
+        "Regresión Logística": LogisticRegression(
             max_iter=1000, class_weight="balanced", random_state=RANDOM_SEED
         ),
-        "Random Forest (Balanceado)": RandomForestClassifier(
+        "Random Forest": RandomForestClassifier(
             n_estimators=250, max_depth=10, min_samples_leaf=5,
             class_weight="balanced", random_state=RANDOM_SEED, n_jobs=-1
         ),
-        "HistGradientBoosting (Campeón)": HistGradientBoostingClassifier(
+        "Gradient Boosting (Campeón)": HistGradientBoostingClassifier(
             max_iter=200, learning_rate=0.06, max_depth=6,
             class_weight="balanced", random_state=RANDOM_SEED
         )
     }
 
-    print("Ejecutando Torneo de Modelos con Validación Cruzada Estratificada (5 Particiones)...")
+    print("Entrenando y comparando modelos predictivos (métricas expresadas en % de 0 a 100%)...")
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
     resultados_torneo = []
     pipelines_entrenados = {}
-
-    # Figura 1: Curvas ROC y Precisión-Sensibilidad comparativas
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    curvas_roc = {}
 
     for nombre, clf in modelos.items():
         pipe = Pipeline([("prep", preprocessor), ("clf", clf)])
-        cv_scores = cross_validate(
-            pipe, X_train, y_train, cv=cv,
-            scoring=["roc_auc", "average_precision", "f1"], n_jobs=-1
-        )
+        cv_scores = cross_validate(pipe, X_train, y_train, cv=cv, scoring=["roc_auc"], n_jobs=-1)
 
         pipe.fit(X_train, y_train)
         pipelines_entrenados[nombre] = pipe
@@ -118,154 +98,246 @@ def train_and_select_champion():
         y_prob_test = pipe.predict_proba(X_test)[:, 1]
         y_pred_test = pipe.predict(X_test)
 
-        roc_test = roc_auc_score(y_test, y_prob_test)
-        pr_auc_test = average_precision_score(y_test, y_prob_test)
-        rec_test = recall_score(y_test, y_pred_test)
-        prec_test = precision_score(y_test, y_pred_test)
-        f1_test = f1_score(y_test, y_pred_test)
+        roc_pct = roc_auc_score(y_test, y_prob_test) * 100
+        rec_pct = recall_score(y_test, y_pred_test) * 100
+        prec_pct = precision_score(y_test, y_pred_test) * 100
+        f1_pct = f1_score(y_test, y_pred_test) * 100
 
         resultados_torneo.append({
-            "Modelo": nombre,
-            "ROC_AUC_Validacion": round(cv_scores["test_roc_auc"].mean(), 4),
-            "ROC_AUC_Prueba": round(roc_test, 4),
-            "PR_AUC_Prueba": round(pr_auc_test, 4),
-            "Sensibilidad_Recall": round(rec_test, 4),
-            "Precision": round(prec_test, 4),
-            "Puntaje_F1": round(f1_test, 4)
+            "Modelo Evaluado": nombre,
+            "Capacidad_Discriminativa_AUC": f"{roc_pct:.1f}%",
+            "Bajas_Detectadas_Recall": f"{rec_pct:.1f}%",
+            "Acierto_de_Alerta_Precision": f"{prec_pct:.1f}%",
+            "Equilibrio_Global_F1": f"{f1_pct:.1f}%",
+            "_auc_num": roc_pct,
+            "_rec_num": rec_pct,
+            "_f1_num": f1_pct
         })
 
         fpr, tpr, _ = roc_curve(y_test, y_prob_test)
-        prec_curve, rec_curve, _ = precision_recall_curve(y_test, y_prob_test)
+        curvas_roc[nombre] = (fpr * 100, tpr * 100, roc_pct)
 
-        axes[0].plot(fpr, tpr, lw=2, label=f"{nombre} (AUC = {roc_test:.3f})")
-        axes[1].plot(rec_curve, prec_curve, lw=2, label=f"{nombre} (PR-AUC = {pr_auc_test:.3f})")
+    df_bench = pd.DataFrame(resultados_torneo).sort_values(by="_auc_num", ascending=False)
+    print("\n--- COMPARATIVA DE RENDIMIENTO DE MODELOS (EN PORCENTAJES DE 0% A 100%) ---")
+    cols_mostrar = [
+        "Modelo Evaluado", "Capacidad_Discriminativa_AUC",
+        "Bajas_Detectadas_Recall", "Acierto_de_Alerta_Precision", "Equilibrio_Global_F1"
+    ]
+    print(df_bench[cols_mostrar].to_string(index=False))
 
-    axes[0].plot([0, 1], [0, 1], "k--", alpha=0.5)
-    axes[0].set_title("Curva ROC Comparativa (Conjunto de Prueba)", fontsize=12, fontweight="bold")
-    axes[0].set_xlabel("Tasa de Falsos Positivos (1 - Especificidad)")
-    axes[0].set_ylabel("Tasa de Verdaderos Positivos (Sensibilidad)")
-    axes[0].legend(loc="lower right")
+    # ==========================================================================
+    # GRÁFICO 1: COMPARATIVA VISUAL DE MODELOS EN PORCENTAJES (0% A 100%)
+    # ==========================================================================
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 
-    axes[1].set_title("Curva Precisión-Sensibilidad (Conjunto de Prueba)", fontsize=12, fontweight="bold")
-    axes[1].set_xlabel("Sensibilidad / Recall (Detección de Bajas)")
-    axes[1].set_ylabel("Precisión (Pureza de la Alerta)")
-    axes[1].legend(loc="lower left")
+    # Panel Izquierdo: Barras agrupadas con % explícito
+    nombres_mod = df_bench["Modelo Evaluado"].tolist()
+    x_pos = np.arange(len(nombres_mod))
+    width = 0.35
 
+    bars1 = axes[0].bar(x_pos - width/2, df_bench["_auc_num"], width, label="Poder Predictivo Global (AUC %)", color="#1f4e78")
+    bars2 = axes[0].bar(x_pos + width/2, df_bench["_rec_num"], width, label="% de Bajas Reales Capturadas (Recall)", color="#2e8b57")
+
+    axes[0].set_title("1. Comparación de Efectividad por Modelo (%)", fontsize=13, fontweight="bold", pad=12)
+    axes[0].set_ylabel("Efectividad (Escala de 0% a 100%)", fontsize=11)
+    axes[0].set_xticks(x_pos)
+    axes[0].set_xticklabels(nombres_mod, fontsize=10, fontweight="bold")
+    axes[0].set_ylim(0, 110)
+    axes[0].yaxis.set_major_formatter(mtick.PercentFormatter())
+    axes[0].legend(loc="upper right", frameon=True)
+
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        axes[0].annotate(
+            f"{h:.1f}%",
+            xy=(bar.get_x() + bar.get_width() / 2, h),
+            xytext=(0, 4), textcoords="offset points",
+            ha="center", va="bottom", fontsize=9.5, fontweight="bold"
+        )
+
+    # Panel Derecho: Curva de Detección en %
+    colores_curva = {"Gradient Boosting (Campeón)": "#d95f02", "Random Forest": "#1f78b4", "Regresión Logística": "#7570b3"}
+    for nombre, (fpr_pct, tpr_pct, auc_val) in curvas_roc.items():
+        axes[1].plot(fpr_pct, tpr_pct, lw=2.5, color=colores_curva.get(nombre, "#333333"), label=f"{nombre} ({auc_val:.1f}%)")
+
+    axes[1].plot([0, 100], [0, 100], "k--", alpha=0.4, label="Azar (50.0%)")
+    axes[1].set_title("2. Curva de Captura de Fugas vs. Falsas Alarmas", fontsize=13, fontweight="bold", pad=12)
+    axes[1].set_xlabel("% de Falsas Alarmas sobre Afiliados Activos", fontsize=11)
+    axes[1].set_ylabel("% de Bajas Reales Detectadas a Tiempo", fontsize=11)
+    axes[1].xaxis.set_major_formatter(mtick.PercentFormatter())
+    axes[1].yaxis.set_major_formatter(mtick.PercentFormatter())
+    axes[1].legend(loc="lower right", frameon=True)
+
+    plt.suptitle("Evaluación de Modelos Predictivos de Fuga (Unidades: Porcentaje de 0% a 100%)", fontsize=15, fontweight="bold", y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(FIGURES_DIR, "01_model_comparison_roc_pr.png"), dpi=180)
+    plt.savefig(os.path.join(FIGURES_DIR, "01_model_comparison_roc_pr.png"), dpi=180, bbox_inches="tight")
     plt.close()
 
-    df_bench = pd.DataFrame(resultados_torneo).sort_values(by="ROC_AUC_Prueba", ascending=False)
-    print("\n--- TABLA COMPARATIVA DE RENDIMIENTO DE MODELOS ---")
-    print(df_bench.to_string(index=False))
-
-    nombre_campeon = df_bench.iloc[0]["Modelo"]
+    # ==========================================================================
+    # GRÁFICO 2: OPTIMIZACIÓN ECONÓMICA EN MILLONES DE PESOS ($ ARS)
+    # ==========================================================================
+    nombre_campeon = df_bench.iloc[0]["Modelo Evaluado"]
     pipe_campeon = pipelines_entrenados[nombre_campeon]
     y_prob_champ = pipe_campeon.predict_proba(X_test)[:, 1]
 
-    # Optimización Financiera del Punto de Corte (Umbral)
-    umbrales = np.linspace(0.10, 0.90, 81)
-    lista_ahorros = []
-    for umb in umbrales:
-        ahorro_neto, _, _, _, _ = calcular_ahorro_financiero(y_test, y_prob_champ, umb)
-        lista_ahorros.append(ahorro_neto)
+    umbrales_dec = np.linspace(0.10, 0.90, 81)
+    ahorros_millones_ars = []
+    for umb in umbrales_dec:
+        ahorro_ars, _, _, _, _ = calcular_ahorro_en_pesos(y_test, y_prob_champ, umb)
+        ahorros_millones_ars.append(ahorro_ars / 1_000_000.0)
 
-    mejor_idx = int(np.argmax(lista_ahorros))
-    umbral_optimo = round(float(umbrales[mejor_idx]), 2)
-    ahorro_maximo, vp, fp, fn, vn = calcular_ahorro_financiero(y_test, y_prob_champ, umbral_optimo)
+    mejor_idx = int(np.argmax(ahorros_millones_ars))
+    umbral_optimo_dec = round(float(umbrales_dec[mejor_idx]), 2)
+    umbral_optimo_pct = int(round(umbral_optimo_dec * 100))
+    ahorro_max_ars, vp, fp, fn, vn = calcular_ahorro_en_pesos(y_test, y_prob_champ, umbral_optimo_dec)
+    ahorro_max_millones = ahorro_max_ars / 1_000_000.0
 
-    print(f"\n -> Modelo Seleccionado (Campeón): {nombre_campeon}")
-    print(f" -> Umbral Financiero Óptimo de Corte: {umbral_optimo} ({umbral_optimo * 100:.0f}% de probabilidad)")
-    print(f" -> Ahorro Económico Neto en Conjunto de Prueba (2.000 afiliados): USD ${ahorro_maximo:,.2f}")
-    print(f" -> Desglose Operativo: {vp} Bajas Reales Detectadas | {fp} Falsas Alarmas | {fn} Bajas No Detectadas")
+    plt.figure(figsize=(10.5, 5.8))
+    umbrales_pct_eje = umbrales_dec * 100
+    plt.plot(umbrales_pct_eje, ahorros_millones_ars, color="#1f4e78", lw=3, label="Ahorro Neto según Punto de Corte")
+    plt.fill_between(umbrales_pct_eje, ahorros_millones_ars, 0, where=(np.array(ahorros_millones_ars) > 0), color="#1f4e78", alpha=0.12)
 
-    # Figura 2: Curva de Optimización de Costo/Beneficio Empresarial
-    plt.figure(figsize=(9, 5))
-    plt.plot(umbrales, lista_ahorros, color="#1f77b4", lw=2.5)
-    plt.axvline(
-        umbral_optimo, color="#d62728", linestyle="--", lw=2,
-        label=f"Umbral Óptimo = {umbral_optimo} (Ahorro Neto: USD ${ahorro_maximo:,.0f})"
+    plt.axvline(umbral_optimo_pct, color="#d62728", linestyle="--", lw=2.2)
+    plt.scatter([umbral_optimo_pct], [ahorro_max_millones], color="#d62728", s=90, zorder=5)
+    plt.annotate(
+        f"PUNTO DE CORTE ÓPTIMO: {umbral_optimo_pct}% de probabilidad\n"
+        f"Ahorro Neto: $ {ahorro_max_millones:,.1f} Millones ARS\n"
+        f"({vp} bajas detectadas | {fp} alertas preventivas)",
+        xy=(umbral_optimo_pct, ahorro_max_millones),
+        xytext=(umbral_optimo_pct + 7, ahorro_max_millones * 0.78),
+        arrowprops=dict(arrowstyle="->", color="#d62728", lw=1.8),
+        fontsize=10, fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#fff8f8", edgecolor="#d62728")
     )
-    plt.title("Optimización Financiera: Ahorro Neto de Retención según Punto de Corte", fontsize=12, fontweight="bold")
-    plt.xlabel("Umbral de Probabilidad de Baja")
-    plt.ylabel("Ahorro Económico Neto Proyectado (USD)")
-    plt.legend()
+
+    plt.title(
+        "Optimización Económica: ¿A partir de qué % de riesgo conviene llamar al afiliado?\n"
+        f"(Valuación sobre muestra de 2.000 afiliados | LTV = $ {VALOR_VIDA_AFILIADO_ARS:,.0f} ARS | Costo Gestión = $ {COSTO_GESTION_RETENCION_ARS:,.0f} ARS)",
+        fontsize=12, fontweight="bold", pad=12
+    )
+    plt.xlabel("Umbral de Probabilidad de Baja para Disparar Alerta (%)", fontsize=11)
+    plt.ylabel("Ahorro Económico Neto en Millones de Pesos ($ ARS)", fontsize=11)
+    plt.gca().xaxis.set_major_formatter(mtick.PercentFormatter())
+    plt.gca().yaxis.set_major_formatter(mtick.FuncFormatter(lambda x, pos: f"$ {x:,.0f} M"))
+    plt.legend(loc="upper left", frameon=True)
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURES_DIR, "02_financial_threshold_optimization.png"), dpi=180)
     plt.close()
 
-    # Figura 3: Importancia de Variables en Español
-    print("\nCalculando Importancia de Variables por Permutación en el Conjunto de Prueba...")
+    # ==========================================================================
+    # GRÁFICO 3: IMPORTANCIA DE VARIABLES EN PORCENTAJE RELATIVO (SUMA = 100%)
+    # ==========================================================================
+    print("\nCalculando Peso Relativo (%) de cada factor en la decisión de baja...")
     perm_imp = permutation_importance(
         pipe_campeon, X_test, y_test, n_repeats=8, random_state=RANDOM_SEED, scoring="roc_auc", n_jobs=-1
     )
 
-    nombres_legibles = {
-        "indice_friccion_salud": "Índice Compuesto de Fricción Salud/CX",
-        "puntaje_sentimiento_nlp": "Sentimiento NLP en Llamadas",
-        "tickets_abiertos_sin_resolver": "Tickets Abiertos Sin Resolver",
+    nombres_claros = {
+        "indice_friccion_afiliado_0a100": "Índice General de Fricción (0 a 100 pts)",
+        "indice_tono_llamada_1a10": "Tono / Clima en Llamadas (Escala 1 a 10)",
+        "reclamos_sin_resolver_cant": "Reclamos Abiertos Sin Resolver (Cantidad)",
         "antiguedad_meses": "Antigüedad del Afiliado (Meses)",
-        "ordenes_rechazadas_90d": "Órdenes Médicas Rechazadas (90d)",
-        "dias_demora_reintegro": "Días de Demora en Reintegros",
-        "aumento_cuota_anual_pct": "% Aumento Anual de Cuota",
-        "facturas_impagas_cant": "Cantidad de Facturas Impagas",
-        "alerta_doble_friccion_critica": "Alerta Doble Fricción (Auditoría + CX)",
-        "llamadas_reincidentes_48h": "Llamadas Reincidentes (< 48hs)",
-        "tasa_rechazo_medico": "Tasa de Rechazo en Auditoría Médica",
-        "adhesion_debito_auto": "Adhesión a Débito Automático",
-        "tipo_contratacion": "Segmento / Tipo de Contratación",
-        "ingresos_app_90d": "Frecuencia de Uso de App Móvil",
-        "tasa_resolucion_primer_contacto": "Tasa de Resolución en 1er Contacto (FCR)"
+        "ordenes_rechazadas_trimestre_cant": "Órdenes Médicas Rechazadas (Cantidad)",
+        "demora_reintegro_dias": "Demora en Pago de Reintegros (Días)",
+        "aumento_cuota_trimestral_pct": "Aumento Trimestral de Cuota (%)",
+        "facturas_impagas_cant": "Facturas Impagas en Mora (Cantidad)",
+        "alerta_doble_friccion_bin": "Doble Fricción: Rechazo Médico + Reclamo",
+        "llamadas_reincidentes_48hs_cant": "Llamadas Reincidentes en 48 hs (Cantidad)",
+        "tasa_rechazo_medico_pct": "Tasa de Rechazo en Auditoría Médica (%)",
+        "adhesion_debito_automatico": "Adhesión a Débito Automático (Sí/No)",
+        "tipo_contratacion": "Tipo de Contratación (Voluntario / Obligatorio)",
+        "ingresos_app_trimestre_cant": "Uso de App Móvil en el Trimestre (Ingresos)",
+        "tasa_resolucion_primer_contacto_pct": "Resolución en Primer Contacto - FCR (%)"
     }
 
-    df_imp = pd.DataFrame({
-        "Variable": [nombres_legibles.get(c, c) for c in feature_cols],
-        "Importancia_Media": perm_imp.importances_mean
-    }).sort_values(by="Importancia_Media", ascending=True).tail(12)
+    imp_positiva = np.maximum(0, perm_imp.importances_mean)
+    suma_imp = imp_positiva.sum() if imp_positiva.sum() > 0 else 1.0
+    peso_relativo_pct = (imp_positiva / suma_imp) * 100.0
 
-    plt.figure(figsize=(10, 6))
-    plt.barh(df_imp["Variable"], df_imp["Importancia_Media"], color="#2b5c8f")
-    plt.title("Top 12 Factores Determinantes de Baja de Afiliados", fontsize=12, fontweight="bold")
-    plt.xlabel("Impacto en Capacidad Predictiva (Caída en ROC-AUC al permutar)")
+    df_imp = pd.DataFrame({
+        "Factor Explicativo": [nombres_claros.get(c, c) for c in feature_cols],
+        "Peso_Porcentual": peso_relativo_pct
+    }).sort_values(by="Peso_Porcentual", ascending=True).tail(10)
+
+    plt.figure(figsize=(11, 6.2))
+    bars = plt.barh(df_imp["Factor Explicativo"], df_imp["Peso_Porcentual"], color="#2b5c8f", height=0.68)
+    plt.title(
+        "¿Qué motiva la baja de un afiliado? - Top 10 Factores por Peso Relativo (%)\n"
+        "(Expresado como porcentaje de influencia sobre el 100% del poder predictivo del modelo)",
+        fontsize=12.5, fontweight="bold", pad=12
+    )
+    plt.xlabel("Peso Relativo en la Predicción de Fuga (%)", fontsize=11)
+    plt.xlim(0, df_imp["Peso_Porcentual"].max() * 1.18)
+    plt.gca().xaxis.set_major_formatter(mtick.PercentFormatter())
+
+    for bar in bars:
+        w = bar.get_width()
+        plt.annotate(
+            f" {w:.1f}%",
+            xy=(w, bar.get_y() + bar.get_height() / 2),
+            va="center", ha="left", fontsize=10, fontweight="bold", color="#1a3a5c"
+        )
+
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURES_DIR, "03_feature_importance.png"), dpi=180)
     plt.close()
 
-    # Figura 4: Matriz de Confusión con Umbral Óptimo
-    y_pred_opt = (y_prob_champ >= umbral_optimo).astype(int)
+    # ==========================================================================
+    # GRÁFICO 4: MATRIZ DE CONFUSIÓN EXPLICADA CON CANTIDADES Y PORCENTAJES
+    # ==========================================================================
+    y_pred_opt = (y_prob_champ >= umbral_optimo_dec).astype(int)
     cm = confusion_matrix(y_test, y_pred_opt)
-    plt.figure(figsize=(6.5, 5))
+    total_muestra = cm.sum()
+
+    etiquetas_celdas = np.array([
+        [
+            f"AFILIADOS ESTABLES\nBIEN CLASIFICADOS\n\n{vn:,} afiliados\n({vn/total_muestra*100:.1f}% del total)",
+            f"ALERTAS PREVENTIVAS\n(Falsas Alarmas)\n\n{fp:,} afiliados\n({fp/total_muestra*100:.1f}% del total)"
+        ],
+        [
+            f"FUGAS NO DETECTADAS\n(Falsos Negativos)\n\n{fn:,} afiliados\n({fn/total_muestra*100:.1f}% del total)",
+            f"BAJAS REALES\nDETECTADAS A TIEMPO\n\n{vp:,} afiliados\n({vp/total_muestra*100:.1f}% del total)"
+        ]
+    ])
+
+    plt.figure(figsize=(8.2, 6.2))
     sns.heatmap(
-        cm, annot=True, fmt="d", cmap="Blues",
-        xticklabels=["Permanece Activo (0)", "Baja / Fuga (1)"],
-        yticklabels=["Permanece Activo (0)", "Baja / Fuga (1)"]
+        cm, annot=etiquetas_celdas, fmt="", cmap="Blues", cbar=False,
+        annot_kws={"size": 10.5, "weight": "bold"},
+        xticklabels=["Predicción: Permanece Activo", "Predicción: Alerta de Baja"],
+        yticklabels=["Realidad: Permanece Activo", "Realidad: Se da de Baja"]
     )
-    plt.title(f"Matriz de Confusión Operativa (Umbral = {umbral_optimo})", fontsize=12, fontweight="bold")
-    plt.ylabel("Estado Real del Afiliado")
-    plt.xlabel("Predicción del Sistema de Alerta")
+    plt.title(
+        f"Resultado Operativo sobre 2.000 Afiliados de Prueba (Corte = {umbral_optimo_pct}%)\n"
+        f"Se detectan {vp} de las {vp + fn} bajas reales ({vp/(vp+fn)*100:.1f}% de efectividad de captura)",
+        fontsize=12, fontweight="bold", pad=14
+    )
+    plt.ylabel("Comportamiento Real del Afiliado", fontsize=11, fontweight="bold")
+    plt.xlabel("Decisión del Sistema de Alerta Temprana", fontsize=11, fontweight="bold")
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURES_DIR, "04_confusion_matrix_optimal.png"), dpi=180)
     plt.close()
 
-    print("\n--- REPORTE DE CLASIFICACIÓN CON UMBRAL FINANCIERO ÓPTIMO ---")
-    df_rep_es = generar_reporte_clasificacion_es(y_test, y_pred_opt)
-    print(df_rep_es.to_string(index=False))
+    print("\n--- RESUMEN ECONÓMICO Y OPERATIVO DEL MODELO CAMPEÓN ---")
+    print(f" -> Modelo Ganador: {nombre_campeon}")
+    print(f" -> Punto de Corte Óptimo: {umbral_optimo_pct}% de probabilidad de baja")
+    print(f" -> Bajas Reales Capturadas a Tiempo: {vp} de {vp + fn} ({vp/(vp+fn)*100:.1f}%)")
+    print(f" -> Ahorro Neto en Muestra de Prueba (2.000 afiliados): $ {ahorro_max_ars:,.0f} ARS ($ {ahorro_max_millones:.2f} Millones)")
+    print(f" -> Ahorro Neto Proyectado al Padrón Total (10.000 afiliados): $ {ahorro_max_ars * 5:,.0f} ARS\n")
 
-    # Guardar modelo y metadatos en español
+    # Guardar artefactos y metadatos
     joblib.dump(pipe_campeon, os.path.join(MODELS_DIR, "champion_churn_pipeline.joblib"))
     metadata = {
         "modelo_campeon": nombre_campeon,
-        "umbral_optimo": umbral_optimo,
-        "roc_auc_prueba": float(df_bench.iloc[0]["ROC_AUC_Prueba"]),
-        "pr_auc_prueba": float(df_bench.iloc[0]["PR_AUC_Prueba"]),
-        "ahorro_neto_estimado_prueba_usd": round(float(ahorro_maximo), 2),
+        "umbral_optimo_decimal": umbral_optimo_dec,
+        "umbral_optimo_porcentaje": f"{umbral_optimo_pct}%",
+        "roc_auc_porcentaje": round(float(df_bench.iloc[0]["_auc_num"]), 2),
+        "ahorro_neto_muestra_ars": round(float(ahorro_max_ars), 2),
+        "ahorro_neto_padron_10k_ars": round(float(ahorro_max_ars * 5), 2),
         "columnas_predictoras": feature_cols
     }
     with open(os.path.join(MODELS_DIR, "model_metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=4, ensure_ascii=False)
-
-    print(f"\n -> Modelo y metadatos exportados en: {MODELS_DIR}")
-    print(f" -> Gráficos en español exportados en: {FIGURES_DIR}\n")
 
 
 if __name__ == "__main__":
